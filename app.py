@@ -14,10 +14,79 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# ---------- LOAD MODEL ----------
+# ---------- LOAD MODEL (with self-healing fallback) ----------
 @st.cache_resource
 def load_bundle():
-    return joblib.load("stroke_model.joblib")
+    """Try to load the pickled bundle. If the pickle is incompatible with
+    the currently-installed sklearn (version drift on Streamlit Cloud), retrain
+    from the raw CSV so the app always works.
+    """
+    try:
+        return joblib.load("stroke_model.joblib")
+    except Exception as e:
+        st.warning(
+            f"Stored model could not be loaded ({type(e).__name__}). "
+            "Retraining from the raw CSV — this takes about 5 seconds and only happens once."
+        )
+        return _retrain_from_csv()
+
+
+def _retrain_from_csv():
+    import pandas as pd
+    import numpy as np
+    from sklearn.compose import ColumnTransformer
+    from sklearn.preprocessing import OneHotEncoder, StandardScaler
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.model_selection import train_test_split
+    from imblearn.over_sampling import SMOTE
+    from imblearn.pipeline import Pipeline as ImbPipeline
+
+    np.random.seed(42)
+    df = pd.read_csv("brainStrokeDataset.csv")
+    df = df.drop(columns=["id"])
+    df["bmi"] = df["bmi"].fillna(df["bmi"].median())
+    df = df[df["gender"] != "Other"].reset_index(drop=True)
+    df["glucose_high"] = (df["avg_glucose_level"] >= 125).astype(int)
+    df["bmi_obese"] = (df["bmi"] >= 30).astype(int)
+
+    X = df.drop(columns=["stroke"])
+    y = df["stroke"]
+
+    cats = ["gender", "ever_married", "work_type", "Residence_type", "smoking_status"]
+    nums = [c for c in X.columns if c not in cats]
+
+    prep = ColumnTransformer([
+        ("num", StandardScaler(), nums),
+        ("cat", OneHotEncoder(handle_unknown="ignore", drop="first"), cats),
+    ])
+    pipe = ImbPipeline([
+        ("prep", prep),
+        ("smote", SMOTE(random_state=42)),
+        ("clf", LogisticRegression(max_iter=1000, random_state=42)),
+    ])
+    Xtr, _, ytr, _ = train_test_split(X, y, test_size=0.2, stratify=y, random_state=42)
+    pipe.fit(Xtr, ytr)
+
+    risk_scores = pipe.predict_proba(X)[:, 1]
+    quantiles = np.percentile(risk_scores, np.arange(0, 101, 1)).tolist()
+
+    return {
+        "model": pipe,
+        "feature_order": list(X.columns),
+        "cat_cols": cats,
+        "num_cols": nums,
+        "pop_stats": {
+            "stroke_rate_overall": float(df["stroke"].mean()),
+            "age_mean": float(df["age"].mean()),
+            "age_std": float(df["age"].std()),
+            "glucose_mean": float(df["avg_glucose_level"].mean()),
+            "bmi_mean": float(df["bmi"].mean()),
+            "n_total": int(len(df)),
+            "n_strokes": int(df["stroke"].sum()),
+        },
+        "risk_quantiles": quantiles,
+    }
+
 
 bundle = load_bundle()
 model = bundle["model"]
