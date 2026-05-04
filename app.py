@@ -91,11 +91,13 @@ risk_quantiles = np.array(bundle["risk_quantiles"])
 
 
 # ---------- STYLING ----------
+# 3-color palette: NAVY (#1A237E) for primary/brand/moderate, RED (#C62828) for high risk,
+# GREEN (#2E7D32) for low risk. Everything else is grayscale.
 st.markdown("""
 <style>
 .main { background-color: #FAFAFA; }
 .stButton>button {
-    background-color: #1565C0;
+    background-color: #1A237E;
     color: white;
     font-weight: bold;
     border-radius: 8px;
@@ -104,41 +106,41 @@ st.markdown("""
     width: 100%;
 }
 .stButton>button:hover {
-    background-color: #1A237E;
+    background-color: #0D1657;
     color: white;
 }
 .metric-card {
     background-color: white;
     padding: 1.2rem;
     border-radius: 10px;
-    border: 1px solid #ECEFF1;
+    border: 1px solid #E0E0E0;
     margin-bottom: 1rem;
 }
 .app-header {
-    background: linear-gradient(90deg, #1A237E 0%, #1565C0 100%);
+    background-color: #1A237E;
     color: white;
     padding: 1.4rem 1.8rem;
     border-radius: 10px;
     margin-bottom: 1.5rem;
 }
 .app-header h1 { color: white; margin: 0; font-size: 1.7rem; }
-.app-header p  { color: #B3E5FC; margin: 0.2rem 0 0; font-size: 0.9rem; }
+.app-header p  { color: #C5CAE9; margin: 0.2rem 0 0; font-size: 0.9rem; }
 .disclaimer {
-    background-color: #FFF8E1;
-    border-left: 4px solid #F57C00;
+    background-color: #F5F5F5;
+    border-left: 4px solid #1A237E;
     padding: 0.8rem 1rem;
     border-radius: 6px;
     font-size: 0.85rem;
-    color: #5D4037;
+    color: #424242;
 }
 .recommendation {
-    background-color: #FFF8E1;
-    border: 1px solid #F57C00;
+    background-color: #F5F5F5;
+    border: 1px solid #1A237E;
     padding: 1rem 1.2rem;
     border-radius: 8px;
     margin-top: 1rem;
 }
-.recommendation h4 { color: #E65100; margin: 0 0 0.4rem 0; }
+.recommendation h4 { color: #1A237E; margin: 0 0 0.4rem 0; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -160,7 +162,7 @@ age = st.sidebar.slider("Age", 1, 100, 55)
 gender = st.sidebar.selectbox("Gender", ["Male", "Female"])
 hypertension = st.sidebar.radio("Hypertension", ["No", "Yes"], horizontal=True)
 heart_disease = st.sidebar.radio("Heart Disease", ["No", "Yes"], horizontal=True)
-ever_married = st.sidebar.selectbox("Ever Married", ["Yes", "No"])
+ever_married = st.sidebar.selectbox("Married", ["Yes", "No"])
 work_type = st.sidebar.selectbox(
     "Work Type", ["Private", "Self-employed", "Govt_job", "children", "Never_worked"]
 )
@@ -224,7 +226,7 @@ def compute_contributions(X):
         "glucose_high": "Glucose >= 125",
         "bmi_obese": "BMI >= 30 (obese)",
         "gender_Male": "Gender: Male",
-        "ever_married_Yes": "Ever married",
+        "ever_married_Yes": "Married",
         "work_type_Private": "Work: Private",
         "work_type_Self-employed": "Work: Self-employed",
         "work_type_children": "Work: children",
@@ -243,11 +245,12 @@ def compute_contributions(X):
 
 
 # ---------- BAND HELPERS ----------
+# 3-color rule: GREEN low, NAVY moderate, RED high.
 def risk_band(prob):
     if prob < 0.20:
         return "Low", "#2E7D32"
     if prob < 0.50:
-        return "Moderate", "#F57C00"
+        return "Moderate", "#1A237E"
     return "High", "#C62828"
 
 
@@ -303,7 +306,7 @@ else:
         st.markdown(f"""
         <div class="metric-card">
           <div style="font-size: 0.85rem; color: #607D8B;">Compared to Population</div>
-          <div style="font-size: 2.3rem; font-weight: bold; color: #1565C0; margin: 0.2rem 0;">
+          <div style="font-size: 2.3rem; font-weight: bold; color: #1A237E; margin: 0.2rem 0;">
             Top {100 - pct}%
           </div>
           <div style="font-size: 0.85rem; color: #455A64;">of stroke risk in the training data</div>
@@ -330,7 +333,7 @@ else:
         st.markdown('<div style="text-align:left;color:#2E7D32;">Low &lt; 20%</div>',
                     unsafe_allow_html=True)
     with legend[1]:
-        st.markdown('<div style="text-align:center;color:#F57C00;">Moderate 20–50%</div>',
+        st.markdown('<div style="text-align:center;color:#1A237E;">Moderate 20-50%</div>',
                     unsafe_allow_html=True)
     with legend[2]:
         st.markdown('<div style="text-align:right;color:#C62828;">High &gt; 50%</div>',
@@ -370,7 +373,7 @@ else:
           <div style="font-size:0.9rem; color:#607D8B; margin-bottom:0.3rem;">
             You scored higher than
           </div>
-          <div style="font-size:3rem; font-weight:bold; color:#1565C0;">{pct}%</div>
+          <div style="font-size:3rem; font-weight:bold; color:#1A237E;">{pct}%</div>
           <div style="font-size:0.9rem; color:#455A64;">
             of the {pop_stats['n_total']:,} patients in the training data.
           </div>

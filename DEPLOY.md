@@ -113,6 +113,24 @@ If `stroke_model.joblib` is missing, run `python train_model.py` first.
 
 ---
 
+## Keeping the app awake (free tier)
+
+Streamlit Community Cloud puts free-tier apps to sleep after about 7 days of no traffic. When that happens, anyone visiting the URL sees a "Yes, get this app back up!" button. They click it, the app wakes up in 30-60 seconds, and works normally. So it's not actually broken — just napping.
+
+If you want the app to stay awake permanently so the class never sees the wake-up screen, set up a free uptime monitor. Takes 2 minutes:
+
+1. Go to https://uptimerobot.com and create a free account
+2. Click **Add New Monitor**
+3. Monitor Type: **HTTP(s)**
+4. Friendly Name: `StrokeRisk Predictor`
+5. URL: `https://strokerisk-predictor.streamlit.app`
+6. Monitoring Interval: **5 minutes** (free tier minimum)
+7. Click **Create Monitor**
+
+UptimeRobot will hit your URL every 5 minutes from a global pool of servers. As long as something pings the app, Streamlit Cloud counts it as active and won't sleep it. Bonus: you'll get an email alert if the app actually goes down for some other reason.
+
+Cron-Job.org and BetterStack are equally good free alternatives if you prefer those.
+
 ## Troubleshooting
 
 **"Module not found" on deploy**: confirm `requirements.txt` is in the repo root, not nested.
@@ -120,5 +138,9 @@ If `stroke_model.joblib` is missing, run `python train_model.py` first.
 **Big file warning on GitHub**: `stroke_model.joblib` is small (under 1 MB) so this should not happen. If it does, you can rebuild it from `train_model.py` on first run.
 
 **App is "in the oven" forever on Streamlit Cloud**: hit the three-dot menu → Reboot.
+
+**App says "This app has gone to sleep due to inactivity"**: that's the free-tier sleep. Click the wake-up button, or set up UptimeRobot using the section above.
+
+**App boots but Calculate button errors out**: usually a sklearn/pandas version mismatch. The app retrains the model from the CSV at startup specifically to avoid this, so this should not happen. If it does, hit Reboot from the three-dot menu and check the logs tab.
 
 **Hugging Face shows "Build error"**: check the build logs for a missing package. Pin the version in `requirements.txt` and retry.
