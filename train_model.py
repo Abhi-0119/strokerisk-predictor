@@ -35,18 +35,28 @@ prep = ColumnTransformer([
 pipe = ImbPipeline([
     ("prep", prep),
     ("smote", SMOTE(random_state=42)),
-    ("clf", LogisticRegression(max_iter=1000, random_state=42)),
+    ("clf", LogisticRegression(max_iter=200, random_state=42, solver="lbfgs")),
 ])
 
-X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, stratify=y, random_state=42)
-pipe.fit(X_train, y_train)
+# Train on full data for production. (Use the notebook for evaluation metrics.)
+pipe.fit(X, y)
 
-# Quick sanity check
+# Quick sanity check using a held-out split, just for the printout
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, stratify=y, random_state=42)
+val = ImbPipeline([
+    ("prep", ColumnTransformer([
+        ("num", StandardScaler(), num_cols),
+        ("cat", OneHotEncoder(handle_unknown="ignore", drop="first"), cat_cols),
+    ])),
+    ("smote", SMOTE(random_state=42)),
+    ("clf", LogisticRegression(max_iter=200, random_state=42, solver="lbfgs")),
+])
+val.fit(X_train, y_train)
 from sklearn.metrics import roc_auc_score, recall_score
-y_proba = pipe.predict_proba(X_test)[:, 1]
-y_pred = pipe.predict(X_test)
-print(f"Test ROC-AUC: {roc_auc_score(y_test, y_proba):.4f}")
-print(f"Test Recall:  {recall_score(y_test, y_pred):.4f}")
+y_proba = val.predict_proba(X_test)[:, 1]
+y_pred = val.predict(X_test)
+print(f"Validation ROC-AUC: {roc_auc_score(y_test, y_proba):.4f}")
+print(f"Validation Recall:  {recall_score(y_test, y_pred):.4f}")
 
 # Population stats for peer-comparison
 pop_stats = {

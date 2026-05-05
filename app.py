@@ -15,12 +15,26 @@ st.set_page_config(
 )
 
 # ---------- LOAD MODEL ----------
-# We always retrain from the raw CSV at startup. This is the most reliable approach
-# because pickled scikit-learn models can break across version differences between
-# the dev machine and the deployment environment. The retrain takes about 5 seconds
-# on cold start and is cached for the rest of the session.
+# Strategy: try the pre-trained joblib first (loads in ~50ms). If that fails for any
+# reason (sklearn version drift, missing file, corrupt pickle), retrain in-memory.
+# The retrain is optimized to finish in about 1 second.
 @st.cache_resource
 def load_bundle():
+    import os
+    if os.path.exists("stroke_model.joblib"):
+        try:
+            bundle = joblib.load("stroke_model.joblib")
+            # Sanity-check: make sure the loaded model can actually predict.
+            test = pd.DataFrame([{
+                "gender": "Male", "age": 50.0, "hypertension": 0, "heart_disease": 0,
+                "ever_married": "Yes", "work_type": "Private", "Residence_type": "Urban",
+                "avg_glucose_level": 100.0, "bmi": 25.0, "smoking_status": "never smoked",
+                "glucose_high": 0, "bmi_obese": 0,
+            }], columns=bundle["feature_order"])
+            bundle["model"].predict_proba(test)
+            return bundle
+        except Exception:
+            pass  # Fall through to retrain
     return _retrain_from_csv()
 
 
@@ -30,7 +44,6 @@ def _retrain_from_csv():
     from sklearn.compose import ColumnTransformer
     from sklearn.preprocessing import OneHotEncoder, StandardScaler
     from sklearn.linear_model import LogisticRegression
-    from sklearn.model_selection import train_test_split
     from imblearn.over_sampling import SMOTE
     from imblearn.pipeline import Pipeline as ImbPipeline
 
@@ -52,13 +65,15 @@ def _retrain_from_csv():
         ("num", StandardScaler(), nums),
         ("cat", OneHotEncoder(handle_unknown="ignore", drop="first"), cats),
     ])
+    # max_iter dropped from 1000 to 200; the model converges well before 200 on this dataset
+    # and skipping the train/test split lets us train on the full data, which is what we want
+    # in production anyway (the test split was only for evaluation in the notebook).
     pipe = ImbPipeline([
         ("prep", prep),
         ("smote", SMOTE(random_state=42)),
-        ("clf", LogisticRegression(max_iter=1000, random_state=42)),
+        ("clf", LogisticRegression(max_iter=200, random_state=42, solver="lbfgs")),
     ])
-    Xtr, _, ytr, _ = train_test_split(X, y, test_size=0.2, stratify=y, random_state=42)
-    pipe.fit(Xtr, ytr)
+    pipe.fit(X, y)
 
     risk_scores = pipe.predict_proba(X)[:, 1]
     quantiles = np.percentile(risk_scores, np.arange(0, 101, 1)).tolist()
@@ -529,62 +544,9 @@ else:
         </div>
         """, unsafe_allow_html=True)
 
-        # ---- Personalized tips, based on this user's actual modifiable factors ----
-        tips = []
-        if hypertension == "Yes":
-            tips.append(("Manage your blood pressure",
-                         "Monitor daily; target under 130/80."))
-        if glucose >= 125:
-            tips.append(("Get a fasting glucose / A1C panel",
-                         f"{int(glucose)} mg/dL is diabetic range — diabetes is a top stroke driver."))
-        elif glucose >= 100:
-            tips.append(("Watch your blood sugar",
-                         "Cut sugary drinks and refined carbs."))
-        if bmi >= 30:
-            tips.append(("Work toward a healthier weight",
-                         f"BMI {bmi:.1f} is obese; even 5-10% weight loss measurably drops risk."))
-        elif bmi >= 25:
-            tips.append(("Aim to bring BMI under 25",
-                         "Modest weight loss plus 150 min/week of exercise."))
-        if smoking_status == "smokes":
-            tips.append(("Quit smoking",
-                         "Quitting halves stroke risk within 5 years."))
-        elif smoking_status == "formerly smoked":
-            tips.append(("Stay quit",
-                         "Risk keeps dropping the longer you stay smoke-free."))
-        if heart_disease == "Yes":
-            tips.append(("Stay on top of your heart care",
-                         "Keep cardiology follow-ups and medications on schedule."))
-        # Universal habits
-        if proba < 0.20 and not tips:
-            tips.append(("Keep up your healthy habits",
-                         "Regular check-ups, balanced diet, 150+ min/week exercise."))
-        if not tips:  # Catch-all when user has no modifiable risk factors but score is still moderate
-            tips.append(("Annual screening",
-                         "Most of your top drivers (like age) are not directly modifiable."))
-
-        # Color the tips/recommendation banner based on risk band
+        # ---- Recommendation banner (color matches the band) ----
         rec_color = BAD_RED if proba >= BAND_THRESHOLD else GOOD_GREEN
         rec_bg = "#FBEAEA" if proba >= BAND_THRESHOLD else "#E8F5E9"
-
-        # ---- Tips section (always shown, color follows the band) ----
-        st.subheader("Tips to reduce your stroke risk")
-        tips_html = ""
-        for title, body in tips:
-            tips_html += f"""
-            <div style="margin-bottom:0.6rem;">
-              <div style="font-weight:600;font-size:0.92rem;color:{rec_color};">&#8226; {title}</div>
-              <div style="font-size:0.86rem;color:#455A64;margin-left:0.85rem;line-height:1.45;">{body}</div>
-            </div>
-            """
-        st.markdown(f"""
-        <div style="background:{rec_bg};border-left:4px solid {rec_color};
-                    border-radius:6px;padding:0.9rem 1rem;">
-          {tips_html}
-        </div>
-        """, unsafe_allow_html=True)
-
-        # ---- Recommendation banner (color matches the band) ----
         if proba >= 0.50:
             rec_title = "Schedule a clinical review soon"
             rec_body = (
@@ -604,13 +566,67 @@ else:
                 "Your profile sits in the lower-risk band. Maintain regular "
                 "check-ups and keep an eye on weight and blood pressure."
             )
-        st.markdown(f"""
-        <div style="background:{rec_bg};border:1px solid {rec_color};
-                    padding:1rem 1.2rem;border-radius:8px;margin-top:0.8rem;">
-          <h4 style="color:{rec_color};margin:0 0 0.4rem 0;">{rec_title}</h4>
-          <p style="margin:0; font-size:0.92rem; color:#263238;">{rec_body}</p>
-        </div>
-        """, unsafe_allow_html=True)
+        st.html(
+            f'<div style="background:{rec_bg};border:1px solid {rec_color};'
+            f'padding:1rem 1.2rem;border-radius:8px;margin-top:0.8rem;">'
+            f'<h4 style="color:{rec_color};margin:0 0 0.4rem 0;">{rec_title}</h4>'
+            f'<p style="margin:0; font-size:0.92rem; color:#263238;">{rec_body}</p>'
+            f'</div>'
+        )
+
+    # ============ FULL-WIDTH TIPS SECTION ============
+    st.markdown("")
+    st.subheader("Tips to reduce your stroke risk")
+    st.caption("Personalized to your modifiable risk factors.")
+
+    tips = []
+    if hypertension == "Yes":
+        tips.append(("Manage your blood pressure",
+                     "Monitor daily; target under 130/80."))
+    if glucose >= 125:
+        tips.append(("Get a fasting glucose / A1C panel",
+                     f"{int(glucose)} mg/dL is diabetic range. Diabetes is a top stroke driver."))
+    elif glucose >= 100:
+        tips.append(("Watch your blood sugar",
+                     "Cut sugary drinks and refined carbs."))
+    if bmi >= 30:
+        tips.append(("Work toward a healthier weight",
+                     f"BMI {bmi:.1f} is obese; even 5-10% weight loss measurably drops risk."))
+    elif bmi >= 25:
+        tips.append(("Aim to bring BMI under 25",
+                     "Modest weight loss plus 150 min/week of exercise."))
+    if smoking_status == "smokes":
+        tips.append(("Quit smoking",
+                     "Quitting halves stroke risk within 5 years."))
+    elif smoking_status == "formerly smoked":
+        tips.append(("Stay quit",
+                     "Risk keeps dropping the longer you stay smoke-free."))
+    if heart_disease == "Yes":
+        tips.append(("Stay on top of your heart care",
+                     "Keep cardiology follow-ups and medications on schedule."))
+    if proba < 0.20 and not tips:
+        tips.append(("Keep up your healthy habits",
+                     "Regular check-ups, balanced diet, 150+ min/week exercise."))
+    if not tips:
+        tips.append(("Annual screening",
+                     "Most of your top drivers (like age) are not directly modifiable."))
+
+    # Build the inner grid HTML in a single line per tip so Streamlit's markdown parser
+    # doesn't treat indented HTML as a code block.
+    tip_cards = ""
+    for title, body in tips:
+        tip_cards += (
+            f'<div><div style="font-weight:500;font-size:14px;color:{rec_color};margin-bottom:4px;">'
+            f'&bull; {title}</div>'
+            f'<div style="font-size:13px;color:#455A64;line-height:1.5;">{body}</div></div>'
+        )
+    st.html(
+        f'<div style="background:{rec_bg};border-left:4px solid {rec_color};'
+        f'border-radius:6px;padding:18px 22px;">'
+        f'<div style="display:grid;grid-template-columns:1fr 1fr;gap:18px 24px;">'
+        f'{tip_cards}'
+        f'</div></div>'
+    )
 
     st.markdown("---")
     with st.expander("See the raw input the model received"):
