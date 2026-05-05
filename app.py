@@ -267,6 +267,71 @@ def percentile_rank(prob):
     return int(np.searchsorted(risk_quantiles, prob, side="left"))
 
 
+# Plain-English reason for each feature, used by the personalized explainer.
+# Returned reason depends on whether the user has the trait (push direction).
+def feature_reason(feature_label, contribution_sign, user_inputs):
+    age = user_inputs["age"]
+    glucose = user_inputs["glucose"]
+    bmi = user_inputs["bmi"]
+    if feature_label == "Age":
+        if contribution_sign > 0:
+            return (f"At age {int(age)}, the data shows stroke risk roughly doubles every "
+                    "decade after 55. This is the single strongest signal in the dataset.")
+        return (f"At age {int(age)}, you're below the age range where stroke risk climbs sharply.")
+    if feature_label == "Glucose level":
+        if contribution_sign > 0:
+            return (f"Your glucose level of {int(glucose)} mg/dL is in or near the diabetic range, "
+                    "which the data links to higher stroke rates.")
+        return (f"Your glucose level of {int(glucose)} mg/dL is in the safe range.")
+    if feature_label == "Glucose >= 125":
+        return ("You're flagged as above the diabetic glucose threshold, a clinically established "
+                "stroke risk factor.")
+    if feature_label == "BMI":
+        if contribution_sign > 0:
+            return (f"A BMI of {bmi:.1f} sits on the high side. Higher BMI correlates with stroke "
+                    "in the training data.")
+        return f"A BMI of {bmi:.1f} is in a healthy range."
+    if feature_label == "BMI >= 30 (obese)":
+        return "You're flagged as obese (BMI ≥ 30), which raises stroke risk in the data."
+    if feature_label == "Hypertension":
+        if contribution_sign > 0:
+            return ("Patients with hypertension had 13.3% stroke rate vs. 4.0% for those without. "
+                    "It's one of the top clinical risk factors.")
+        return "No hypertension means you avoid one of the strongest clinical risk factors."
+    if feature_label == "Heart disease":
+        if contribution_sign > 0:
+            return ("Patients with heart disease had 17.0% stroke rate vs. 4.2% for those without. "
+                    "Heart disease shares a lot of underlying biology with stroke.")
+        return "No heart disease means you avoid one of the strongest clinical risk factors."
+    if feature_label == "Married":
+        if contribution_sign > 0:
+            return ("In this dataset, married patients had higher stroke rates, partly because "
+                    "they tend to be older.")
+        return "Being unmarried is associated with lower stroke risk in the data, mostly an age effect."
+    if feature_label == "Currently smokes":
+        return "Smoking is a known stroke risk factor."
+    if feature_label == "Formerly smoked":
+        if contribution_sign > 0:
+            return ("Former smokers had the highest stroke rate in the dataset (7.9%), likely "
+                    "because many quit after a health scare.")
+        return "Former smokers had a higher stroke rate, but this didn't apply strongly to your profile."
+    if feature_label == "Never smoked":
+        if contribution_sign < 0:
+            return "Never-smokers had a lower stroke rate. The model treats this as protective."
+        return "Never-smoker status didn't move the needle much for your profile."
+    if feature_label == "Gender: Male":
+        if contribution_sign > 0:
+            return "Male gender slightly raises predicted risk in this dataset."
+        return "Female gender is associated with slightly lower stroke risk in the data."
+    if feature_label == "Residence: Urban":
+        if contribution_sign > 0:
+            return "Urban residence shows a small association with higher stroke rate, possibly tied to lifestyle factors."
+        return "Rural residence shows a small protective effect in the data."
+    if feature_label.startswith("Work:"):
+        return f"{feature_label} is associated with this risk direction in the dataset."
+    return "This trait shifts predicted risk based on patterns in the training data."
+
+
 # ---------- MAIN PANEL ----------
 if not predict:
     col_left, col_right = st.columns([3, 2])
@@ -311,12 +376,16 @@ else:
           <div style="font-size: 1rem; color: {band_color}; font-weight: bold;">{band} Risk Band</div>
         </div>
         """, unsafe_allow_html=True)
+    # The "Top X%" metric: smaller number = closer to the highest-risk slice = bad.
+    # Use red if user is in the top half (top X% < 50), green if bottom half.
+    top_pct = 100 - pct
+    pop_color = BAD_RED if top_pct < 50 else GOOD_GREEN
     with g2:
         st.markdown(f"""
         <div class="metric-card">
           <div style="font-size: 0.85rem; color: #607D8B;">Compared to Population</div>
-          <div style="font-size: 2.3rem; font-weight: bold; color: #1A237E; margin: 0.2rem 0;">
-            Top {100 - pct}%
+          <div style="font-size: 2.3rem; font-weight: bold; color: {pop_color}; margin: 0.2rem 0;">
+            Top {top_pct}%
           </div>
           <div style="font-size: 0.85rem; color: #455A64;">of stroke risk in the training data</div>
         </div>
@@ -332,36 +401,74 @@ else:
         </div>
         """, unsafe_allow_html=True)
 
-    # ============ HOW IT WORKS EXPANDER ============
-    with st.expander("ℹ️  How is this score calculated?"):
-        st.markdown("""
-The model is a **logistic regression** trained with **SMOTE oversampling** on
-5,109 patient records. Logistic regression is a standard statistical method that
-learns how much each input nudges the predicted outcome up or down.
+    # ============ PERSONALIZED EXPLAINER ============
+    with st.expander(f"ℹ️  Why the model says your risk is {band.lower()} ({proba*100:.1f}%)"):
+        # Pull this user's actual contributions
+        contribs_df = compute_contributions(X_input)
+        risk_drivers = contribs_df[contribs_df["contribution"] > 0].head(3)
+        protectives = contribs_df[contribs_df["contribution"] < 0].head(3)
 
-When you click **Calculate My Risk**, the app does four things:
+        user_inputs = {"age": age, "glucose": glucose, "bmi": bmi}
 
-1. **Standardizes your inputs** so values like age 67 and BMI 28 sit on a comparable scale.
-2. **Multiplies each input by a coefficient** the model learned during training. Some
-   coefficients are positive (raise risk), some are negative (lower risk).
-3. **Sums the contributions** to produce a single number called the log-odds.
-4. **Squashes that number through a sigmoid function** to map it to a percentage between
-   0% and 100%.
+        st.markdown(f"#### What pushed your score **up**")
+        if len(risk_drivers) == 0:
+            st.markdown("Nothing in your profile flagged as a stroke risk factor.")
+        else:
+            for _, row in risk_drivers.iterrows():
+                reason = feature_reason(row["feature"], row["contribution"], user_inputs)
+                st.markdown(
+                    f"- **{row['feature']}** &nbsp; "
+                    f"<span style='color:{BAD_RED};font-size:0.85rem;'>"
+                    f"contribution: {row['contribution']:+.2f}</span><br>"
+                    f"<span style='color:#455A64;font-size:0.92rem;'>{reason}</span>",
+                    unsafe_allow_html=True
+                )
 
-The **Top Risk Drivers** panel below shows you the biggest individual contributions in
-order, so you can see exactly which inputs moved the needle for your profile.
+        st.markdown(f"#### What pushed your score **down**")
+        if len(protectives) == 0:
+            st.markdown("Nothing in your profile reduced your stroke risk.")
+        else:
+            for _, row in protectives.iterrows():
+                reason = feature_reason(row["feature"], row["contribution"], user_inputs)
+                st.markdown(
+                    f"- **{row['feature']}** &nbsp; "
+                    f"<span style='color:{GOOD_GREEN};font-size:0.85rem;'>"
+                    f"contribution: {row['contribution']:+.2f}</span><br>"
+                    f"<span style='color:#455A64;font-size:0.92rem;'>{reason}</span>",
+                    unsafe_allow_html=True
+                )
 
-**About the percentage**: SMOTE oversampling distorts the raw probability scale, so a
-reading like 35% does **not** mean "35 out of 100 patients with this profile have a stroke."
-It means "this profile sits well above population average risk." The Risk Band on the gauge
-translates the percentage into a clinical interpretation: under 20% is low (green / good),
-above 20% the model is flagging risk that's worth a clinician's attention (red / bad).
+        # Reach the conclusion
+        net = float(contribs_df["contribution"].sum())
+        if proba >= BAND_THRESHOLD:
+            verdict = (
+                f"The risk-raising factors outweighed the protective ones (net log-odds **{net:+.2f}**). "
+                f"After running through the model's sigmoid function, that net score maps to a "
+                f"**{proba*100:.1f}%** prediction. Above our 20% screening threshold, so the app flags "
+                f"this profile as worth a clinician's attention."
+            )
+        else:
+            verdict = (
+                f"The protective factors outweighed the risk-raising ones (net log-odds **{net:+.2f}**). "
+                f"After the sigmoid step, that maps to a **{proba*100:.1f}%** prediction. Below our 20% "
+                f"screening threshold, so the app flags this profile as low risk."
+            )
+        st.markdown(f"#### Bottom line")
+        st.markdown(verdict)
 
-**Why we chose this model**: of the four we tested (logistic regression, logistic + SMOTE,
-random forest, gradient boosting), the SMOTE-trained logit caught **82% of real strokes** in
-the test set, vs. just 4% for vanilla logistic regression. Recall matters more than raw
-accuracy in a screening tool — missing a stroke is a much bigger cost than a false alarm.
-        """)
+        st.markdown("---")
+        st.markdown(
+            "<span style='color:#607D8B;font-size:0.85rem;'>"
+            "<b>How the math works:</b> the model is a logistic regression trained with SMOTE oversampling "
+            "on 5,109 patient records. For each input, it learned a coefficient during training. Your "
+            "inputs get multiplied by those coefficients, the contributions are summed, and the total is "
+            "passed through a sigmoid to produce the percentage above. The bars in the Top Risk Drivers "
+            "panel below show those individual contributions in order. SMOTE shifts the raw probability "
+            "scale upward, so the percentage reads as 'how far above average risk' rather than a literal "
+            "X-out-of-100 probability."
+            "</span>",
+            unsafe_allow_html=True,
+        )
 
     # ============ RISK BAR ============
     st.markdown("**Risk gauge**")
@@ -408,19 +515,76 @@ accuracy in a screening tool — missing a stroke is a much bigger cost than a f
     with peer_col:
         st.subheader("How You Compare")
         st.caption("Where this risk score falls in the patient population.")
+        # If user beats more than half the population, that's worse risk = red.
+        peer_color = BAD_RED if pct >= 50 else GOOD_GREEN
         st.markdown(f"""
         <div class="metric-card" style="text-align:center;">
           <div style="font-size:0.9rem; color:#607D8B; margin-bottom:0.3rem;">
             You scored higher than
           </div>
-          <div style="font-size:3rem; font-weight:bold; color:#1A237E;">{pct}%</div>
+          <div style="font-size:3rem; font-weight:bold; color:{peer_color};">{pct}%</div>
           <div style="font-size:0.9rem; color:#455A64;">
             of the {pop_stats['n_total']:,} patients in the training data.
           </div>
         </div>
         """, unsafe_allow_html=True)
 
-        # Recommendation
+        # ---- Personalized tips, based on this user's actual modifiable factors ----
+        tips = []
+        if hypertension == "Yes":
+            tips.append(("Manage your blood pressure",
+                         "Monitor daily; target under 130/80."))
+        if glucose >= 125:
+            tips.append(("Get a fasting glucose / A1C panel",
+                         f"{int(glucose)} mg/dL is diabetic range — diabetes is a top stroke driver."))
+        elif glucose >= 100:
+            tips.append(("Watch your blood sugar",
+                         "Cut sugary drinks and refined carbs."))
+        if bmi >= 30:
+            tips.append(("Work toward a healthier weight",
+                         f"BMI {bmi:.1f} is obese; even 5-10% weight loss measurably drops risk."))
+        elif bmi >= 25:
+            tips.append(("Aim to bring BMI under 25",
+                         "Modest weight loss plus 150 min/week of exercise."))
+        if smoking_status == "smokes":
+            tips.append(("Quit smoking",
+                         "Quitting halves stroke risk within 5 years."))
+        elif smoking_status == "formerly smoked":
+            tips.append(("Stay quit",
+                         "Risk keeps dropping the longer you stay smoke-free."))
+        if heart_disease == "Yes":
+            tips.append(("Stay on top of your heart care",
+                         "Keep cardiology follow-ups and medications on schedule."))
+        # Universal habits
+        if proba < 0.20 and not tips:
+            tips.append(("Keep up your healthy habits",
+                         "Regular check-ups, balanced diet, 150+ min/week exercise."))
+        if not tips:  # Catch-all when user has no modifiable risk factors but score is still moderate
+            tips.append(("Annual screening",
+                         "Most of your top drivers (like age) are not directly modifiable."))
+
+        # Color the tips/recommendation banner based on risk band
+        rec_color = BAD_RED if proba >= BAND_THRESHOLD else GOOD_GREEN
+        rec_bg = "#FBEAEA" if proba >= BAND_THRESHOLD else "#E8F5E9"
+
+        # ---- Tips section (always shown, color follows the band) ----
+        st.subheader("Tips to reduce your stroke risk")
+        tips_html = ""
+        for title, body in tips:
+            tips_html += f"""
+            <div style="margin-bottom:0.6rem;">
+              <div style="font-weight:600;font-size:0.92rem;color:{rec_color};">&#8226; {title}</div>
+              <div style="font-size:0.86rem;color:#455A64;margin-left:0.85rem;line-height:1.45;">{body}</div>
+            </div>
+            """
+        st.markdown(f"""
+        <div style="background:{rec_bg};border-left:4px solid {rec_color};
+                    border-radius:6px;padding:0.9rem 1rem;">
+          {tips_html}
+        </div>
+        """, unsafe_allow_html=True)
+
+        # ---- Recommendation banner (color matches the band) ----
         if proba >= 0.50:
             rec_title = "Schedule a clinical review soon"
             rec_body = (
@@ -441,9 +605,10 @@ accuracy in a screening tool — missing a stroke is a much bigger cost than a f
                 "check-ups and keep an eye on weight and blood pressure."
             )
         st.markdown(f"""
-        <div class="recommendation">
-          <h4>📋 {rec_title}</h4>
-          <p style="margin:0; font-size:0.92rem;">{rec_body}</p>
+        <div style="background:{rec_bg};border:1px solid {rec_color};
+                    padding:1rem 1.2rem;border-radius:8px;margin-top:0.8rem;">
+          <h4 style="color:{rec_color};margin:0 0 0.4rem 0;">{rec_title}</h4>
+          <p style="margin:0; font-size:0.92rem; color:#263238;">{rec_body}</p>
         </div>
         """, unsafe_allow_html=True)
 
